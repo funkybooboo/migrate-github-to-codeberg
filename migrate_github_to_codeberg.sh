@@ -6,7 +6,7 @@
 # Author: Rahul Martim Juliato
 # Email: rahul.juliato@gmail.com
 # License: GPL-3.0
-# Version: 0.1.1
+# Version: 0.1.2
 #
 # This script migrates GitHub repositories to Codeberg.
 #
@@ -46,8 +46,6 @@
 #
 # -----------------------------------------------------------
 
-
-
 # USER CONFIGURATION
 #---------------------------------------------------------------------------
 
@@ -85,10 +83,9 @@ DESCRIPTION_PREFIX=""
 # DESCRIPTION_PREFIX="[Secondary] - "
 # DESCRIPTION_PREFIX="Draft: "
 
-
 # UTILS FUNCTIONS
 #---------------------------------------------------------------------------
-array_contains () { 
+array_contains() {
     local array="$1[@]"
     local seeking=$2
     local in=1
@@ -100,7 +97,6 @@ array_contains () {
     done
     return $in
 }
-
 
 # PROCESSING
 #---------------------------------------------------------------------------
@@ -126,19 +122,17 @@ printf "\n\n    Press ENTER to continue, C-c to abort.\n\n"
 read
 printf ">>> Working...\n"
 
-
 # NOTE: Github api paginates to max 100 repositories, this calculates how many
 #       runs (pages) we're going to do to fetch all user data.
 GITHUB_PAGINATION=100
 github_total_repos=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/user" | jq '.public_repos + .total_private_repos')
-github_needed_pages=$(( ($github_total_repos + $GITHUB_PAGINATION - 1) / $GITHUB_PAGINATION ))
-
+github_needed_pages=$((($github_total_repos + $GITHUB_PAGINATION - 1) / $GITHUB_PAGINATION))
 
 # Start Migration to Codeberg
 for ((github_page_counter = 1; github_page_counter <= github_needed_pages; github_page_counter++)); do
 
     repos=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/user/repos?per_page=${GITHUB_PAGINATION}&page=${github_page_counter}")
-    
+
     echo "$repos" | jq -c '.[]' | while read -r row; do
         repo_name=$(echo "$row" | jq -r '.name')
 
@@ -154,45 +148,60 @@ for ((github_page_counter = 1; github_page_counter <= github_needed_pages; githu
         #                                 A) it is not owned by a targeted user
         #                                 B) no specific users are targeted
         if ! array_contains OWNERS "$repo_owner" && [ ${#OWNERS[@]} -ne 0 ]; then
-          continue
+            continue
         fi
 
         repo_clone_url=$(echo "$row" | jq -r '.clone_url')
         repo_description="$DESCRIPTION_PREFIX$(echo "$row" | jq -r '.description')"
         repo_is_private=$(echo "$row" | jq -r '.private')
 
-        printf ">>> Migrating: $repo_name ($( [ "$repo_is_private" = "true" ] && echo "private" || echo "public" ))...\n"
+        printf ">>> Migrating: $repo_name ($([ "$repo_is_private" = "true" ] && echo "private" || echo "public"))...\n"
 
-        response=$(curl -s -f -w "%{http_code}" -X POST -H "Content-Type: application/json" -H "Authorization: token $CODEBERG_TOKEN" -d '{
-            "auth_username": "'"$GITHUB_USERNAME"'",
-            "auth_token": "'"$GITHUB_TOKEN"'",
-            "clone_addr": "'"$repo_clone_url"'",
-            "private": '$repo_is_private',
-            "repo_name": "'"$repo_name"'",
-            "repo_owner": "'"$CODEBERG_USERNAME"'",
-            "service": "github",
-            "description": "'"$repo_description"'"
-        }' "https://codeberg.org/api/v1/repos/migrate")
+        json_payload=$(jq -n \
+            --arg auth_username "$GITHUB_USERNAME" \
+            --arg auth_token "$GITHUB_TOKEN" \
+            --arg clone_addr "$repo_clone_url" \
+            --argjson private "$repo_is_private" \
+            --arg repo_name "$repo_name" \
+            --arg repo_owner "$CODEBERG_USERNAME" \
+            --arg description "$repo_description" \
+            '{
+                auth_username: $auth_username,
+                auth_token: $auth_token,
+                clone_addr: $clone_addr,
+                private: $private,
+                repo_name: $repo_name,
+                repo_owner: $repo_owner,
+                service: "github",
+                description: $description
+            }')
 
-        http_status=$(echo "$response" | awk 'END {print $NF}')
-        
+        response=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -H "Authorization: token $CODEBERG_TOKEN" -d "$json_payload" "https://codeberg.org/api/v1/repos/migrate")
+
+        response_body=$(echo "$response" | head -n -1)
+        http_status=$(echo "$response" | tail -n 1)
+
         case $http_status in
-            201)
-                printf " Success!\n"
-                ;;
-            409)
-                printf " Error! Already exists on Codeberg.\n"
-                ;;
-            403)
-                printf "Error! Forbidden.\n"
-                ;;
-            *)
-                printf "Error: Unknown! $http_status\n"
-                ;;
+        201)
+            printf " Success!\n"
+            ;;
+        409)
+            printf " Error! Already exists on Codeberg.\n"
+            ;;
+        403)
+            printf "Error! Forbidden.\n"
+            ;;
+        *)
+            error_message=$(echo "$response_body" | jq -r '.message // empty' 2>/dev/null)
+            if [ -n "$error_message" ]; then
+                printf "Error: %s (HTTP %s)\n" "$error_message" "$http_status"
+            else
+                printf "Error: Unknown! %s\n" "$http_status"
+            fi
+            ;;
         esac
-        
+
     done
 done
-
 
 echo ">>> Migration script completed!"
