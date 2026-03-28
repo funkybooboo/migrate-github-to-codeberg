@@ -1,105 +1,95 @@
-#!/bin/bash
-#
-# GitHub to Codeberg Migration Script
-# ------------------------------------
-#
-# Author: Rahul Martim Juliato
-# Email: rahul.juliato@gmail.com
-# License: GPL-3.0
-# Version: 0.1.2
-#
-# This script migrates GitHub repositories to Codeberg.
-#
-# User Configuration:
-# --------------------
-# GitHub username and personal access token
-# GITHUB_USERNAME="YourGitHubUsername"
-# GITHUB_TOKEN="YourGitHubToken"
-#
-# Codeberg username and personal access token
-# CODEBERG_USERNAME="YourCodebergUsername"
-# CODEBERG_TOKEN="YourCodebergToken"
-#
-# Define the REPOSITORIES array with repository names you want to migrate
-# Leave it blank to migrate all repositories, or create a list of repositories
-# if you want to select specific ones.
-# REPOSITORIES=(
-#     "repository1"
-#     "repository2"
-#     "repository3"
-# )
-#
-# Custom prefix for description
-# DESCRIPTION_PREFIX=""
-# or something like:
-# DESCRIPTION_PREFIX="[MIRROR] "
-#
-# Usage:
-# ------
-# 1. Configure the user settings at the beginning of the script.
-# 2. Run the script.
-# 3. Follow the on-screen instructions to proceed with the migration.
-#
-# Note: Make sure to have 'curl' and 'jq' installed.
-#
-# Press ENTER to continue, or C-c to abort.
-#
-# -----------------------------------------------------------
+#!/usr/bin/env bash
 
-# USER CONFIGURATION
-#---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/.env"
+LOG_FILE="$SCRIPT_DIR/migrate_$(date '+%Y%m%d_%H%M%S').log"
 
-# GitHub username and personal access token
-GITHUB_USERNAME="YourGitHubUsername"
-GITHUB_TOKEN="YourGitHubToken"
+log() {
+    local level="$1" msg="$2"
+    local line="[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $msg"
+    printf "%s\n" "$line" >> "$LOG_FILE"
+    if [ "$level" = "ERROR" ]; then
+        printf "%s\n" "$line" >&2
+    else
+        printf "%s\n" "$line"
+    fi
+}
 
-# Codeberg username and personal access token
-CODEBERG_USERNAME="YourCodebergUsername"
-CODEBERG_TOKEN="YourCodebergToken"
+if [ ! -f "$ENV_FILE" ]; then
+    log ERROR ".env file not found at $ENV_FILE — copy .env.example to .env and fill in your credentials."
+    exit 1
+fi
+source "$ENV_FILE"
 
-# Define the REPOSITORIES array with repository names you want to migrate
-# Leave it blank so you migrate ALL repositories. Create a one per line list
-# if you want to select the repositories to migrate.
+REPOSITORIES=("${REPOSITORIES[@]}")
+OWNERS=("${OWNERS[@]}")
+DESCRIPTION_PREFIX="${DESCRIPTION_PREFIX:-}"
+CODEBERG_REQUEST_DELAY="${CODEBERG_REQUEST_DELAY:-2}"
+GITHUB_PAGE_SIZE="${GITHUB_PAGE_SIZE:-100}"
+CODEBERG_PAGE_SIZE="${CODEBERG_PAGE_SIZE:-50}"
+CURL_MAX_RETRIES="${CURL_MAX_RETRIES:-5}"
+CURL_RETRY_AFTER_DEFAULT="${CURL_RETRY_AFTER_DEFAULT:-60}"
 
-REPOSITORIES=()
-# REPOSITORIES=(
-#     "repository1"
-#     "repository2"
-#     "repository3"
-# )
+_errors=0
+for _var in GITHUB_USERNAME GITHUB_TOKEN CODEBERG_USERNAME CODEBERG_TOKEN; do
+    _val="${!_var}"
+    if [ -z "$_val" ]; then
+        log ERROR "$_var is not set in .env"
+        ((_errors++))
+    elif [[ "$_val" == Your* ]]; then
+        log ERROR "$_var still has a placeholder value in .env"
+        ((_errors++))
+    fi
+done
+[ $_errors -gt 0 ] && exit 1
 
-# Define the OWNERS array with specific user names whose repositories you want to migrate
-# Leave it blank so you migrate ALL repositories. Create a one per line list
-# if you want to select the repositories to migrate.
+for _cmd in curl jq; do
+    if ! command -v "$_cmd" &>/dev/null; then
+        log ERROR "'$_cmd' is required but not installed."
+        exit 1
+    fi
+done
 
-OWNERS=()
-# OWNERS=(
-#     "owner1"
-#     "owner2"
-# )
+# Wraps curl, automatically retrying on HTTP 429 by honouring the retry-after
+# header (defaulting to 60 s if absent). All other curl flags are passed through.
+# Output format: response_body\nhttp_status  (same as curl -s -w "\n%{http_code}")
+curl_retrying() {
+    local max_retries="$CURL_MAX_RETRIES"
+    local attempt=0
+    local tmpfile response http_status retry_after
 
-# Custom prefix for description
-DESCRIPTION_PREFIX=""
-# DESCRIPTION_PREFIX="[Secondary] - "
-# DESCRIPTION_PREFIX="Draft: "
+    while [ $attempt -le $max_retries ]; do
+        tmpfile=$(mktemp)
+        response=$(curl -s -w "\n%{http_code}" -D "$tmpfile" "$@")
+        http_status=$(printf '%s' "$response" | tail -n 1)
 
-# UTILS FUNCTIONS
-#---------------------------------------------------------------------------
+        if [ "$http_status" = "429" ]; then
+            retry_after=$(grep -i "^retry-after:" "$tmpfile" | tr -d '\r' | awk '{print $2}')
+            retry_after=${retry_after:-$CURL_RETRY_AFTER_DEFAULT}
+            rm -f "$tmpfile"
+            log WARN "Rate limited (HTTP 429) — waiting ${retry_after}s before retry (attempt $((attempt + 1))/$max_retries)..."
+            sleep "$retry_after"
+            ((attempt++))
+        else
+            rm -f "$tmpfile"
+            printf '%s' "$response"
+            return 0
+        fi
+    done
+    rm -f "$tmpfile"
+    printf '%s' "$response"
+    return 1
+}
+
 array_contains() {
     local array="$1[@]"
     local seeking=$2
-    local in=1
     for element in "${!array}"; do
-        if [[ $element == "$seeking" ]]; then
-            in=0
-            break
-        fi
+        [[ $element == "$seeking" ]] && return 0
     done
-    return $in
+    return 1
 }
 
-# PROCESSING
-#---------------------------------------------------------------------------
 printf "\n    ----------------------------------------------"
 printf "\n    Welcome to Github to Codeberg Migration Script"
 printf "\n    ----------------------------------------------\n"
@@ -112,50 +102,59 @@ else
     printf "\n    Migrating repos owned by: %s" "${OWNERS[@]}"
 fi
 if [ ${#REPOSITORIES[@]} -eq 0 ]; then
-    printf "\n    Migrating repo          : all"
+    printf "\n    Migrating repos         : all"
 else
     printf "\n    Migrating repos         : %s" "${REPOSITORIES[@]}"
 fi
-printf "\n"
-printf "\n    If you wish to change this, abort and change this script.\n\n"
+printf "\n    Log file                : %s" "$LOG_FILE"
 printf "\n\n    Press ENTER to continue, C-c to abort.\n\n"
 read
-printf ">>> Working...\n"
 
-# NOTE: Github api paginates to max 100 repositories, this calculates how many
-#       runs (pages) we're going to do to fetch all user data.
-GITHUB_PAGINATION=100
-github_total_repos=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/user" | jq '.public_repos + .total_private_repos')
-github_needed_pages=$((($github_total_repos + $GITHUB_PAGINATION - 1) / $GITHUB_PAGINATION))
+log INFO "Migration started — GitHub user: $GITHUB_USERNAME, Codeberg user: $CODEBERG_USERNAME"
 
-# Start Migration to Codeberg
-for ((github_page_counter = 1; github_page_counter <= github_needed_pages; github_page_counter++)); do
+migrated=0
+skipped=0
+failed=0
 
-    repos=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/user/repos?per_page=${GITHUB_PAGINATION}&page=${github_page_counter}")
+# https://docs.github.com/en/rest/users/users#get-the-authenticated-user
+_user_response=$(curl_retrying -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/user")
+_user_body=$(printf '%s' "$_user_response" | head -n -1)
+github_total_repos=$(printf '%s' "$_user_body" | jq '.public_repos + .total_private_repos')
+github_total_pages=$(( (github_total_repos + GITHUB_PAGE_SIZE - 1) / GITHUB_PAGE_SIZE ))
 
-    echo "$repos" | jq -c '.[]' | while read -r row; do
+log INFO "Found $github_total_repos repos across $github_total_pages page(s) on GitHub."
+
+for ((page = 1; page <= github_total_pages; page++)); do
+    # https://docs.github.com/en/rest/repos/repos#list-repositories-for-the-authenticated-user
+    _repos_response=$(curl_retrying -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/user/repos?per_page=${GITHUB_PAGE_SIZE}&page=${page}")
+    repos=$(printf '%s' "$_repos_response" | head -n -1)
+
+    while read -r row; do
         repo_name=$(echo "$row" | jq -r '.name')
+        repo_owner=$(echo "$row" | jq -r '.owner.login')
 
-        # Skips current processing repo if
-        #                                 A) it is not on the wanted list
-        #                             or  B) and you're migrating 'all'
-        if ! array_contains REPOSITORIES "$repo_name" && [ ${#REPOSITORIES[@]} -ne 0 ]; then
+        if [ ${#REPOSITORIES[@]} -ne 0 ] && ! array_contains REPOSITORIES "$repo_name"; then
             continue
         fi
 
-        repo_owner=$(echo "$row" | jq -r '.owner.login')
-        # Skips current processing repo if
-        #                                 A) it is not owned by a targeted user
-        #                                 B) no specific users are targeted
-        if ! array_contains OWNERS "$repo_owner" && [ ${#OWNERS[@]} -ne 0 ]; then
+        if [ ${#OWNERS[@]} -ne 0 ] && ! array_contains OWNERS "$repo_owner"; then
             continue
         fi
 
         repo_clone_url=$(echo "$row" | jq -r '.clone_url')
         repo_description="$DESCRIPTION_PREFIX$(echo "$row" | jq -r '.description')"
         repo_is_private=$(echo "$row" | jq -r '.private')
+        visibility=$([ "$repo_is_private" = "true" ] && echo "private" || echo "public")
 
-        printf ">>> Migrating: $repo_name ($([ "$repo_is_private" = "true" ] && echo "private" || echo "public"))...\n"
+        _existing_response=$(curl_retrying \
+            -H "Authorization: token $CODEBERG_TOKEN" \
+            "https://codeberg.org/api/v1/repos/$CODEBERG_USERNAME/$repo_name")
+        existing=$(printf '%s' "$_existing_response" | tail -n 1)
+        if [ "$existing" = "200" ]; then
+            log INFO "$repo_name ($visibility): skipped — already exists on Codeberg."
+            ((skipped++))
+            continue
+        fi
 
         json_payload=$(jq -n \
             --arg auth_username "$GITHUB_USERNAME" \
@@ -176,32 +175,42 @@ for ((github_page_counter = 1; github_page_counter <= github_needed_pages; githu
                 description: $description
             }')
 
-        response=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" -H "Authorization: token $CODEBERG_TOKEN" -d "$json_payload" "https://codeberg.org/api/v1/repos/migrate")
+        # https://codeberg.org/api/swagger#/repository/repoMigrate
+        response=$(curl_retrying -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: token $CODEBERG_TOKEN" \
+            -d "$json_payload" \
+            "https://codeberg.org/api/v1/repos/migrate")
 
-        response_body=$(echo "$response" | head -n -1)
-        http_status=$(echo "$response" | tail -n 1)
+        response_body=$(printf '%s' "$response" | head -n -1)
+        http_status=$(printf '%s' "$response" | tail -n 1)
 
         case $http_status in
         201)
-            printf " Success!\n"
-            ;;
-        409)
-            printf " Error! Already exists on Codeberg.\n"
+            log INFO "$repo_name ($visibility): migrated successfully."
+            ((migrated++))
             ;;
         403)
-            printf "Error! Forbidden.\n"
+            log ERROR "$repo_name ($visibility): forbidden (HTTP 403)."
+            ((failed++))
             ;;
         *)
-            error_message=$(echo "$response_body" | jq -r '.message // empty' 2>/dev/null)
-            if [ -n "$error_message" ]; then
-                printf "Error: %s (HTTP %s)\n" "$error_message" "$http_status"
+            error_message=$(printf '%s' "$response_body" | jq -r '.message // empty' 2>/dev/null)
+            if printf '%s' "$error_message" | grep -qi "limit of.*repositor\|repositor.*limit\|reached your limit"; then
+                log ERROR "$repo_name ($visibility): Codeberg repository cap reached (default: 100). Request an increase at https://codeberg.org/Codeberg-e.V./requests"
+                log INFO "Migration aborted — migrated: $migrated, skipped: $skipped, failed: $((failed + 1))."
+                exit 1
+            elif [ -n "$error_message" ]; then
+                log ERROR "$repo_name ($visibility): $error_message (HTTP $http_status)."
             else
-                printf "Error: Unknown! %s\n" "$http_status"
+                log ERROR "$repo_name ($visibility): unknown error (HTTP $http_status)."
             fi
+            ((failed++))
             ;;
         esac
 
-    done
+        sleep "$CODEBERG_REQUEST_DELAY"
+    done < <(echo "$repos" | jq -c '.[]')
 done
 
-echo ">>> Migration script completed!"
+log INFO "Migration completed — migrated: $migrated, skipped: $skipped, failed: $failed."
