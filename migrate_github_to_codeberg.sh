@@ -126,8 +126,15 @@ log INFO "Found $github_total_repos repos across $github_total_pages page(s) on 
 
 for ((page = 1; page <= github_total_pages; page++)); do
     # https://docs.github.com/en/rest/repos/repos#list-repositories-for-the-authenticated-user
-    _repos_response=$(curl_retrying -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/user/repos?per_page=${GITHUB_PAGE_SIZE}&page=${page}")
+    _repos_response=$(curl_retrying -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/user/repos?type=owner&per_page=${GITHUB_PAGE_SIZE}&page=${page}")
     repos=$(printf '%s' "$_repos_response" | head -n -1)
+    _repos_status=$(printf '%s' "$_repos_response" | tail -n 1)
+
+    if [ "$_repos_status" != "200" ]; then
+        error_message=$(printf '%s' "$repos" | jq -r '.message // empty' 2>/dev/null)
+        log ERROR "Failed to fetch repos page $page (HTTP $_repos_status)${error_message:+: $error_message}."
+        exit 1
+    fi
 
     while read -r row; do
         repo_name=$(echo "$row" | jq -r '.name')
@@ -145,16 +152,6 @@ for ((page = 1; page <= github_total_pages; page++)); do
         repo_description="$DESCRIPTION_PREFIX$(echo "$row" | jq -r '.description')"
         repo_is_private=$(echo "$row" | jq -r '.private')
         visibility=$([ "$repo_is_private" = "true" ] && echo "private" || echo "public")
-
-        _existing_response=$(curl_retrying \
-            -H "Authorization: token $CODEBERG_TOKEN" \
-            "https://codeberg.org/api/v1/repos/$CODEBERG_USERNAME/$repo_name")
-        existing=$(printf '%s' "$_existing_response" | tail -n 1)
-        if [ "$existing" = "200" ]; then
-            log INFO "$repo_name ($visibility): skipped — already exists on Codeberg."
-            ((skipped++))
-            continue
-        fi
 
         json_payload=$(jq -n \
             --arg auth_username "$GITHUB_USERNAME" \
@@ -189,6 +186,10 @@ for ((page = 1; page <= github_total_pages; page++)); do
         201)
             log INFO "$repo_name ($visibility): migrated successfully."
             ((migrated++))
+            ;;
+        409)
+            log INFO "$repo_name ($visibility): skipped — already exists on Codeberg."
+            ((skipped++))
             ;;
         403)
             log ERROR "$repo_name ($visibility): forbidden (HTTP 403)."
