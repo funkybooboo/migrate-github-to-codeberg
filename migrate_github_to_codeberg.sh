@@ -24,6 +24,7 @@ source "$ENV_FILE"
 REPOSITORIES=("${REPOSITORIES[@]}")
 OWNERS=("${OWNERS[@]}")
 DESCRIPTION_PREFIX="${DESCRIPTION_PREFIX:-}"
+FORGEJO_BASE_URL="${FORGEJO_BASE_URL:-https://codeberg.org}"
 CODEBERG_REQUEST_DELAY="${CODEBERG_REQUEST_DELAY:-2}"
 GITHUB_PAGE_SIZE="${GITHUB_PAGE_SIZE:-100}"
 CODEBERG_PAGE_SIZE="${CODEBERG_PAGE_SIZE:-50}"
@@ -177,7 +178,7 @@ for ((page = 1; page <= github_total_pages; page++)); do
             -H "Content-Type: application/json" \
             -H "Authorization: token $CODEBERG_TOKEN" \
             -d "$json_payload" \
-            "https://codeberg.org/api/v1/repos/migrate")
+            "$FORGEJO_BASE_URL/api/v1/repos/migrate")
 
         response_body=$(printf '%s' "$response" | head -n -1)
         http_status=$(printf '%s' "$response" | tail -n 1)
@@ -198,7 +199,7 @@ for ((page = 1; page <= github_total_pages; page++)); do
         *)
             error_message=$(printf '%s' "$response_body" | jq -r '.message // empty' 2>/dev/null)
             if printf '%s' "$error_message" | grep -qi "limit of.*repositor\|repositor.*limit\|reached your limit"; then
-                log ERROR "$repo_name ($visibility): Codeberg repository cap reached (default: 100). Request an increase at https://codeberg.org/Codeberg-e.V./requests"
+                log ERROR "$repo_name ($visibility): Forgejo repository cap reached. If using Codeberg, request an increase at https://codeberg.org/Codeberg-e.V./requests"
                 log INFO "Migration aborted — migrated: $migrated, skipped: $skipped, failed: $((failed + 1))."
                 exit 1
             elif [ -n "$error_message" ]; then
