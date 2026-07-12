@@ -21,6 +21,8 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 source "$ENV_FILE"
 
+REPOSITORIES=("${REPOSITORIES[@]}")
+OWNERS=("${OWNERS[@]}")
 FORGEJO_BASE_URL="${FORGEJO_BASE_URL:-https://codeberg.org}"
 GITHUB_PAGE_SIZE="${GITHUB_PAGE_SIZE:-100}"
 CURL_MAX_RETRIES="${CURL_MAX_RETRIES:-5}"
@@ -101,6 +103,12 @@ if [ ${#REPOSITORIES[@]} -eq 0 ]; then
 else
     printf "\n    Repositories    : %s" "${REPOSITORIES[@]}"
 fi
+if [ ${#OWNERS[@]} -eq 0 ]; then
+    printf "\n    Owners          : all"
+else
+    printf "\n    Owners          : %s" "${OWNERS[@]}"
+fi
+printf "\n    Log file        : %s" "$LOG_FILE"
 printf "\n\n    Press ENTER to continue, C-c to abort.\n\n"
 read
 
@@ -120,10 +128,21 @@ if [ ${#REPOSITORIES[@]} -eq 0 ]; then
 
     for ((page = 1; page <= total_pages; page++)); do
         _repos=$(curl_retrying -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/user/repos?type=owner&per_page=${GITHUB_PAGE_SIZE}&page=${page}")
+        _repos_status=$(printf '%s' "$_repos" | tail -n 1)
+        if [ "$_repos_status" != "200" ]; then
+            _msg=$(printf '%s' "$_repos" | head -n -1 | jq -r '.message // empty' 2>/dev/null)
+            log ERROR "Failed to fetch repos page $page (HTTP $_repos_status)${_msg:+: $_msg}."
+            exit 1
+        fi
         repos=$(printf '%s' "$_repos" | head -n -1)
-        while read -r repo; do
-            repos_to_process+=("$repo")
-        done < <(echo "$repos" | jq -r '.[] | "\(.owner.login)/\(.name)"')
+        while read -r row; do
+            _r_owner=$(printf '%s' "$row" | jq -r '.owner.login')
+            _r_name=$(printf '%s' "$row" | jq -r '.name')
+            if [ ${#OWNERS[@]} -ne 0 ] && ! array_contains OWNERS "$_r_owner"; then
+                continue
+            fi
+            repos_to_process+=("$_r_owner/$_r_name")
+        done < <(printf '%s' "$repos" | jq -c '.[]')
     done
 else
     for repo in "${REPOSITORIES[@]}"; do
@@ -137,22 +156,29 @@ for repo_full in "${repos_to_process[@]}"; do
 
     log INFO "Processing issues for $repo_name..."
 
-    # Get GitHub issues (excluding pull requests)
+    # Get GitHub issues (excluding pull requests), paginating until empty.
     state_filter="all"
-    _issues_response=$(curl_retrying -H "Authorization: token $GITHUB_TOKEN" \
-        "https://api.github.com/repos/$repo_owner/$repo_name/issues?state=$state_filter&per_page=${GITHUB_PAGE_SIZE}")
+    issue_page=1
+    while true; do
+        # https://docs.github.com/en/rest/issues/issues#list-repository-issues
+        _issues_response=$(curl_retrying -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$repo_owner/$repo_name/issues?state=$state_filter&per_page=${GITHUB_PAGE_SIZE}&page=${issue_page}")
 
-    _issues_status=$(printf '%s' "$_issues_response" | tail -n 1)
-    if [ "$_issues_status" != "200" ]; then
-        log ERROR "$repo_name: failed to fetch issues (HTTP $_issues_status)."
-        ((failed++))
-        continue
-    fi
+        _issues_status=$(printf '%s' "$_issues_response" | tail -n 1)
+        if [ "$_issues_status" != "200" ]; then
+            log ERROR "$repo_name: failed to fetch issues page $issue_page (HTTP $_issues_status)."
+            ((failed++))
+            break
+        fi
 
-    issues=$(printf '%s' "$_issues_response" | head -n -1)
+        issues=$(printf '%s' "$_issues_response" | head -n -1)
+        # Empty array → no more pages.
+        if [ "$(printf '%s' "$issues" | jq 'length')" -eq 0 ]; then
+            break
+        fi
 
-    # Process each issue
-    while read -r issue; do
+        # Process each issue on this page
+        while read -r issue; do
         issue_number=$(echo "$issue" | jq -r '.number')
         issue_title=$(echo "$issue" | jq -r '.title')
         issue_body=$(echo "$issue" | jq -r '.body // ""')
@@ -249,11 +275,14 @@ $comment_body"
             fi
         fi
 
-        log INFO "$repo_name#$issue_number → Codeberg#$new_issue_number: migrated ($issue_state)."
-        ((migrated++))
-        sleep "$CODEBERG_REQUEST_DELAY"
+            log INFO "$repo_name#$issue_number → Codeberg#$new_issue_number: migrated ($issue_state)."
+            ((migrated++))
+            sleep "$CODEBERG_REQUEST_DELAY"
 
-    done < <(echo "$issues" | jq -c '.[]')
+        done < <(printf '%s' "$issues" | jq -c '.[]')
+
+        ((issue_page++))
+    done
 done
 
 log INFO "Issues migration completed — migrated: $migrated, skipped: $skipped, failed: $failed."

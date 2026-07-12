@@ -21,10 +21,13 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 source "$ENV_FILE"
 
+REPOSITORIES=("${REPOSITORIES[@]}")
+OWNERS=("${OWNERS[@]}")
 FORGEJO_BASE_URL="${FORGEJO_BASE_URL:-https://codeberg.org}"
 GITHUB_PAGE_SIZE="${GITHUB_PAGE_SIZE:-100}"
 CURL_MAX_RETRIES="${CURL_MAX_RETRIES:-5}"
 CURL_RETRY_AFTER_DEFAULT="${CURL_RETRY_AFTER_DEFAULT:-60}"
+MARK_REQUEST_DELAY="${MARK_REQUEST_DELAY:-1}"
 
 MIGRATION_NOTICE="${MIGRATION_NOTICE:-"This repository has been migrated to Codeberg. Active development continues there."}"
 MIGRATION_PREFIX="${MIGRATION_PREFIX:-"[ARCHIVED] Migrated to Codeberg: "}"
@@ -122,6 +125,11 @@ if [ ${#REPOSITORIES[@]} -eq 0 ]; then
     printf "\n    Repos to mark   : all"
 else
     printf "\n    Repos to mark   : %s" "${REPOSITORIES[@]}"
+fi
+if [ ${#OWNERS[@]} -eq 0 ]; then
+    printf "\n    Owners          : all"
+else
+    printf "\n    Owners          : %s" "${OWNERS[@]}"
 fi
 printf "\n    Log file        : %s" "$LOG_FILE"
 printf "\n\n    This script will:"
@@ -303,7 +311,7 @@ This GitHub repository is now archived and read-only." \
         fi
 
         ((marked++))
-        sleep 1
+        sleep "$MARK_REQUEST_DELAY"
     done < <(echo "$repos" | jq -c '.[]')
 done
 
