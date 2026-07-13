@@ -4,12 +4,10 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
-LOG_FILE="$SCRIPT_DIR/update_profile_$(date '+%Y%m%d_%H%M%S').log"
 
 log() {
     local level="$1" msg="$2"
     local line="[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $msg"
-    printf "%s\n" "$line" >>"$LOG_FILE"
     if [ "$level" = "ERROR" ]; then
         printf "%s\n" "$line" >&2
     else
@@ -103,7 +101,6 @@ printf "\n    GitHub User     : $GITHUB_USERNAME"
 printf "\n    Forgejo URL     : $FORGEJO_BASE_URL"
 printf "\n    Update bio      : %s" "$([ -n "$PROFILE_BIO" ] && echo "yes" || echo "no (PROFILE_BIO empty)")"
 printf "\n    Update README   : $UPDATE_README"
-printf "\n    Log file        : %s" "$LOG_FILE"
 printf "\n\n    This script will:"
 printf "\n      1. Update your GitHub profile bio (PATCH /user)"
 printf "\n      2. Prepend a migration notice to your profile README repo (%s/%s)" "$GITHUB_USERNAME" "$GITHUB_USERNAME"

@@ -180,8 +180,7 @@ When `REPOSITORIES` is non-empty it always wins; `OWNERS` only filters the "all 
 
 ## Logging
 
-Each run writes a timestamped log file in the repo directory, e.g.
-`migrate_20250101_120000.log`. These are ignored by `.gitignore`.
+Each run logs to stdout (errors go to stderr) — no log files are written.
 
 ## Limitations
 
@@ -250,8 +249,6 @@ For large batches, adding a short delay between migration calls (e.g. `CODEBERG_
     Using description prefix: [MIRROR]
     Migrating repos owned by: all users
     Migrating repos         : all
-    Log file                : /path/to/repo/migrate_20250101_120000.log
-
     Press ENTER to continue, C-c to abort.
 
 >>> Working...

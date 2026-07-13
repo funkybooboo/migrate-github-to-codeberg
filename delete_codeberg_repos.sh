@@ -4,12 +4,10 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
-LOG_FILE="$SCRIPT_DIR/delete_$(date '+%Y%m%d_%H%M%S').log"
 
 log() {
     local level="$1" msg="$2"
     local line="[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $msg"
-    printf "%s\n" "$line" >> "$LOG_FILE"
     if [ "$level" = "ERROR" ]; then
         printf "%s\n" "$line" >&2
     else
@@ -84,7 +82,6 @@ printf "\n    Welcome to Codeberg Repository Deletion Script"
 printf "\n    ----------------------------------------------\n"
 printf "\n    User on Codeberg: $CODEBERG_USERNAME"
 printf "\n    Forgejo URL     : $FORGEJO_BASE_URL"
-printf "\n    Log file        : $LOG_FILE"
 printf "\n\n    *** THIS IS IRREVERSIBLE — every repo owned by"
 printf "\n        $CODEBERG_USERNAME will be deleted. ***"
 printf "\n\n    Press ENTER to continue, C-c to abort.\n\n"
